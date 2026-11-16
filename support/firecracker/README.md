@@ -184,7 +184,7 @@ See Firecracker's [hotplug](https://github.com/firecracker-microvm/firecracker/b
 and [balloon security guidance](https://github.com/firecracker-microvm/firecracker/blob/v1.18.0/docs/ballooning.md#security-disclaimer).
 
 Growth persists the grant and raises host limits before adding guest memory.
-CPU changes, shrinking, and over-capacity requests are rejected. Retain the
+Shrinking and over-capacity requests are rejected. Retain the
 reservation after an error or disconnect until `live_resource_grant` reconciles
 it or terminate the VM; retrying the same target is safe. Filesystem and RAM
 captures retain the grant separately from request identity.

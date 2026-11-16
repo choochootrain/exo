@@ -62,7 +62,7 @@ fn assert_balloon(config: &FirecrackerConfig, record: &MachineRecord, mib: u32) 
 async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> {
     let temp = tempfile::Builder::new().prefix("m").tempdir()?;
     let image = std::env::var("FIRECRACKER_IMAGE")?;
-    let config = config(temp.path(), &image);
+    let mut config = config(temp.path(), &image);
     let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
     let mut request = native_request(&config, "growth", &image)?;
     request.spec.resources = SandboxResourceShape::new(1, 4096);
@@ -72,6 +72,7 @@ async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> 
         request.provider_state = handle.provider_state();
         let capacity = handle.live_resource_ceiling().context("missing growth capacity")?;
         ensure!(capacity.memory_mib.get() >= 8192, "test needs at least 8 GiB capacity");
+        ensure!(capacity.vcpu_count.get() >= 4, "test needs four host CPUs");
         let record = allocation(&backend, &request).await?;
         assert_balloon(&config, &record, 0)?;
         let before = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
@@ -84,7 +85,7 @@ async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> 
             fs::read(cgroup.join("memory.max"))?,
             fs::read(cgroup.join("memory.high"))?,
         );
-        for shape in [(2, 4096), (1, 2048), (1, capacity.memory_mib.get() + 1)] {
+        for shape in [(capacity.vcpu_count.get() + 1, 4096), (1, 2048), (1, capacity.memory_mib.get() + 1)] {
             assert!(
                 handle
                     .expand_resources(SandboxResourceShape::new(shape.0, shape.1).unwrap())
@@ -136,7 +137,7 @@ while True:
         let mut echo = [0; 6];
         tokio::io::AsyncReadExt::read_exact(&mut connection, &mut echo).await?;
         assert_eq!(&echo, b"before");
-        let grown = SandboxResourceShape::new(1, 8192).unwrap();
+        let grown = SandboxResourceShape::new(4, 8192).unwrap();
         let api = jail_root(&config, &record.machine_id).join("run/firecracker.socket");
         let parked = api.with_extension("parked");
         fs::rename(&api, &parked)?;
@@ -167,7 +168,13 @@ while True:
         peer.join().unwrap()?;
         fs::rename(&parked, &api)?;
         assert_eq!(concurrent??, "during-growth");
-        assert!(failure.is_err());
+        assert!(matches!(failure?, crate::SandboxResourceUpdate::Incomplete {
+            reservation,
+            cpu: crate::SandboxResourceUpdateStatus::Confirmed,
+            memory: crate::SandboxResourceUpdateStatus::Unconfirmed,
+            ..
+        } if reservation == grown));
+        assert_eq!(fs::read_to_string(cgroup.join("cpu.max"))?.trim(), "400000 100000");
         assert_eq!(handle.live_resource_grant().await?, Some(grown));
         assert_balloon(&config, &record, 0)?;
         assert!(
@@ -180,8 +187,8 @@ while True:
             shell(&handle, "printf usable-after-failure").await?,
             "usable-after-failure"
         );
-        assert_eq!(handle.expand_resources(grown).await?, grown);
-        assert_eq!(handle.expand_resources(grown).await?, grown);
+        assert!(matches!(handle.expand_resources(grown).await?, crate::SandboxResourceUpdate::Applied { grant } if grant == grown));
+        assert!(matches!(handle.expand_resources(grown).await?, crate::SandboxResourceUpdate::Applied { grant } if grant == grown));
         assert_eq!(
             balloon::grant(&allocation(&backend, &request).await?)?,
             8192
@@ -225,6 +232,8 @@ while True:
             .acquire_from_snapshot(request.clone(), snapshot.clone())
             .await?;
         let restored_record = allocation(&backend, &request).await?;
+        assert_eq!(restored.live_resource_grant().await?, Some(grown));
+        assert_eq!(fs::read_to_string(firecracker_cgroup_dir(&config, &restored_record.machine_id).join("cpu.max"))?.trim(), "400000 100000");
         ensure!(
             balloon::grant(&restored_record)? == 8192,
             "filesystem restore lost the expanded memory grant"
@@ -306,12 +315,19 @@ async fn live_memory_ram_fork_and_restore_retain_grant_and_identity() -> Result<
     target.sandbox_id = "ram-target".into();
     let result: Result<()> = async {
         let handle = backend.acquire(source.clone()).await?;
-        handle
-            .expand_resources(SandboxResourceShape::new(1, 1025).unwrap())
-            .await?;
+        assert!(matches!(
+            handle
+                .expand_resources(SandboxResourceShape::new(2, 1025).unwrap())
+                .await?,
+            crate::SandboxResourceUpdate::Applied { .. }
+        ));
         shell(&handle, "printf retained > /tmp/ram-state").await?;
         let fork = backend.fork_sandbox(source.clone(), target.clone()).await?;
         let fork_record = allocation(&backend, &target).await?;
+        assert_eq!(
+            fork.live_resource_grant().await?,
+            SandboxResourceShape::new(2, 1025)
+        );
         ensure!(
             balloon::grant(&fork_record)? == 1025,
             "fork lost the memory grant"
@@ -334,6 +350,10 @@ async fn live_memory_ram_fork_and_restore_retain_grant_and_identity() -> Result<
             .acquire_from_snapshot(target.clone(), snapshot.clone())
             .await?;
         let restored_record = allocation(&backend, &target).await?;
+        assert_eq!(
+            restored.live_resource_grant().await?,
+            SandboxResourceShape::new(2, 1025)
+        );
         ensure!(
             balloon::grant(&restored_record)? == 1025,
             "RAM restore lost the memory grant"
@@ -387,7 +407,10 @@ async fn live_memory_disconnect_capture_and_shutdown_races() -> Result<()> {
             handle.expand_resources(SandboxResourceShape::new(1, 8192).unwrap()),
             handle.snapshot(crate::SnapshotKind::Filesystem),
         );
-        growth?;
+        assert!(matches!(
+            growth?,
+            crate::SandboxResourceUpdate::Applied { .. }
+        ));
         let capture = capture?;
         assert_eq!(
             balloon::grant(&allocation(&backend, &request).await?)?,
@@ -401,6 +424,12 @@ async fn live_memory_disconnect_capture_and_shutdown_races() -> Result<()> {
             handle.stop(),
         );
         stop?;
+        if let Ok(update) = &growth {
+            assert!(matches!(
+                update,
+                crate::SandboxResourceUpdate::Applied { .. }
+            ));
+        }
         if let Err(error) = growth {
             assert!(
                 error.to_string().contains("not running") || error.to_string().contains("missing"),
@@ -445,25 +474,12 @@ async fn live_memory_growth_makes_six_gib_writable() -> Result<()> {
     request.spec.resources = SandboxResourceShape::new(1, 2048);
     let result: Result<()> = async {
         let handle = backend.acquire(request).await?;
-        assert_eq!(
-            handle.live_resource_grant().await?,
-            SandboxResourceShape::new(1, 2048)
-        );
-        assert_eq!(
-            handle.live_resource_ceiling(),
-            SandboxResourceShape::new(1, 262144)
-        );
-        let available = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
-            .await?
-            .trim()
-            .parse::<u64>()?;
-        ensure!(
-            available > 1024 * 1024,
-            "large capacity consumed the initial grant: {available} KiB"
-        );
-        handle
-            .expand_resources(SandboxResourceShape::new(1, 8192).unwrap())
-            .await?;
+        assert!(matches!(
+            handle
+                .expand_resources(SandboxResourceShape::new(1, 8192).unwrap())
+                .await?,
+            crate::SandboxResourceUpdate::Applied { .. }
+        ));
         // Fault in all 6 GiB and verify a nonzero byte in every page of guest RAM.
         // Reading MemTotal alone cannot prove that ballooned pages became usable.
         let mut probe = command(

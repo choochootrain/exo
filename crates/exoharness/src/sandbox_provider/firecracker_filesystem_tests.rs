@@ -5,7 +5,7 @@ use super::super::tests::{native_request, shell};
 
 fn fixture(config: &FirecrackerConfig) -> Result<SnapshotPayload> {
     let manifest = FilesystemManifest {
-        memory_grant_mib: None,
+        resource_grant: None,
         template: false,
         key: "a".repeat(64),
         sandbox_id: "filesystem-test".into(),
@@ -359,7 +359,8 @@ async fn filesystem_snapshot_suspend_restart_and_import_round_trip() -> Result<(
             files.disks.clone(),
         )
         .await?;
-    let target = native_request(&config_b, "imported", &image)?;
+    let mut target = native_request(&config_b, "imported", &image)?;
+    target.spec.resources = SandboxResourceShape::new(1, 512);
     let mut wrong_layout = target.clone();
     wrong_layout.spec.mounts[0].guest_path = "/wrong".into();
     assert!(
@@ -375,6 +376,11 @@ async fn filesystem_snapshot_suspend_restart_and_import_round_trip() -> Result<(
         shell(&restored, "/tmp/retained-tool").await?,
         "root-installed:capturedworkspace"
     );
+    let memory = shell(&restored, "awk '/MemTotal:/ {print $2}' /proc/meminfo")
+        .await?
+        .trim()
+        .parse::<u64>()?;
+    assert!(memory > 400 * 1024 && memory < 512 * 1024);
     worker_b.terminate(target).await?;
     drop(restored);
     worker_b.delete_snapshot(imported).await?;
