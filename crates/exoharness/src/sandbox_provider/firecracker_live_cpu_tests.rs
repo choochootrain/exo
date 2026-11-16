@@ -82,7 +82,6 @@ while True:
             crate::SandboxResourceUpdate::Applied { grant } if grant == target));
         assert_eq!(fs::read_to_string(cgroup.join("cpu.max"))?.trim(), "400000 100000");
         let after = cpu_rate(&cgroup).await?;
-        eprintln!("CPU equivalents before={before:.2} after={after:.2}");
         assert!(after >= 2.0 && after > before * 1.7, "growth did not add execution capacity: {before} -> {after}");
         assert_eq!(fs::read(backend.shared.pid_path(&id))?, pid);
         let error = handle.expand_resources(SandboxResourceShape::new(2, 512).unwrap()).await.unwrap_err();
