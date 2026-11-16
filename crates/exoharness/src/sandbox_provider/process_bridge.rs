@@ -729,10 +729,9 @@ mod tests {
                 if let Err(error) = socket.shutdown(std::net::Shutdown::Write) {
                     tracing::debug!(%error, "test bridge already disconnected");
                 }
-                if let Err(error) = socket.set_read_timeout(Some(Duration::from_millis(200))) {
-                    tracing::debug!(%error, "test bridge cleanup timeout unavailable");
-                    return;
-                }
+                socket
+                    .set_read_timeout(Some(Duration::from_millis(200)))
+                    .unwrap();
                 if let Err(error) = socket.read(&mut [0u8; 1]) {
                     tracing::debug!(%error, "test bridge cleanup acknowledgement unavailable");
                 }
