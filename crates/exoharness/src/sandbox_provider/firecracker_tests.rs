@@ -1146,7 +1146,7 @@ async fn snapshot_grant_is_part_of_the_allocation_without_changing_its_identity(
     Arc::get_mut(&mut shared)
         .unwrap()
         .host_fingerprint
-        .cpu_ceiling = Some(8);
+        .cpu_ceiling = Some(512);
     let request = FirecrackerRequest::from(SandboxRequest {
         sandbox_id: "grant".into(),
         scope: crate::ResourceScope::Global,
@@ -1190,7 +1190,7 @@ async fn snapshot_grant_is_part_of_the_allocation_without_changing_its_identity(
             "fc-grant",
             "spec",
             None,
-            SandboxResourceShape::new(4, 8192),
+            SandboxResourceShape::new(384, 8192),
         )
         .await?;
     let persisted = shared
@@ -1201,7 +1201,7 @@ async fn snapshot_grant_is_part_of_the_allocation_without_changing_its_identity(
     assert_eq!(persisted.spec_hash, "spec");
     assert_eq!(
         balloon::resources(&persisted)?,
-        SandboxResourceShape::new(4, 8192).unwrap()
+        SandboxResourceShape::new(384, 8192).unwrap()
     );
     assert_eq!(persisted.runtime.vcpu_count, 1);
     assert_eq!(

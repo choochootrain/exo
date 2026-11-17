@@ -3014,7 +3014,7 @@ fn firecracker_host_fingerprint(
     config: &FirecrackerConfig,
     firecracker_version: String,
 ) -> Result<FirecrackerHostFingerprint> {
-    let max_vcpu_count = u16::try_from(balloon::kvm_capability(66)?)?;
+    let max_vcpu_count = u16::try_from(balloon::kvm_capability(balloon::KVM_CAP_MAX_VCPUS)?)?;
     let memory_ceiling_mib = config
         .live_resource_growth
         .then(balloon::host_memory_capacity)

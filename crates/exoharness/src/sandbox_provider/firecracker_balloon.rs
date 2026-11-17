@@ -1,6 +1,7 @@
 use super::*;
 
 pub(super) const KVM_CAP_NR_MEMSLOTS: libc::c_int = 10;
+pub(super) const KVM_CAP_MAX_VCPUS: libc::c_int = 66;
 
 const BALLOON_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -285,13 +286,26 @@ fn apply_grant(
     // Journal the reservation before changing any host or guest limit.
     replace_manifest(&config.state_root, &record)?;
     use crate::SandboxResourceUpdateStatus::{Confirmed, Unconfirmed};
-    let mut cpu = if record.runtime.cpu_ceiling.is_some() { Unconfirmed } else { Confirmed };
-    let mut memory = if record.runtime.memory_ceiling_mib.is_some() { Unconfirmed } else { Confirmed };
+    let mut cpu = if record.runtime.cpu_ceiling.is_some() {
+        Unconfirmed
+    } else {
+        Confirmed
+    };
+    let mut memory = if record.runtime.memory_ceiling_mib.is_some() {
+        Unconfirmed
+    } else {
+        Confirmed
+    };
     let applied = (|| -> Result<()> {
-        fs::write(cgroup.join("memory.max"),
-            (u64::from(firecracker_host_reservation(target)?.memory_mib.get()) * 1024 * 1024).to_string())?;
-        fs::write(cgroup.join("memory.high"),
-            ((u64::from(memory_mib) + 256) * 1024 * 1024).to_string())?;
+        fs::write(
+            cgroup.join("memory.max"),
+            (u64::from(firecracker_host_reservation(target)?.memory_mib.get()) * 1024 * 1024)
+                .to_string(),
+        )?;
+        fs::write(
+            cgroup.join("memory.high"),
+            ((u64::from(memory_mib) + 256) * 1024 * 1024).to_string(),
+        )?;
         if record.runtime.cpu_ceiling.is_some() {
             fs::write(cgroup.join("cpu.max"), cpu_quota(target.vcpu_count.get()))?;
             cpu = Confirmed;
@@ -305,7 +319,10 @@ fn apply_grant(
     Ok(match applied {
         Ok(()) => crate::SandboxResourceUpdate::Applied { grant: target },
         Err(error) => crate::SandboxResourceUpdate::Incomplete {
-            reservation: target, cpu, memory, error: error.into(),
+            reservation: target,
+            cpu,
+            memory,
+            error: error.into(),
         },
     })
 }
@@ -413,16 +430,20 @@ mod tests {
         fs::create_dir_all(config.state_root.join("manifests"))?;
         write_manifest(&config.state_root, &record)?;
         let before = fs::read(manifest_path(&config.state_root, &record.machine_id))?;
-        let error = apply_grant(
+        let update = apply_grant(
             &config,
             &record,
             &root.path().join("missing-cgroup"),
             SandboxResourceShape::new(2, 8192).unwrap(),
         )
-        .unwrap_err();
-        assert!(
-            matches!(error, crate::SandboxError::Internal(error) if error.downcast_ref::<std::io::Error>().is_some())
-        );
+        .unwrap();
+        assert!(matches!(
+            update,
+            crate::SandboxResourceUpdate::Incomplete {
+                memory: crate::SandboxResourceUpdateStatus::Unconfirmed,
+                ..
+            }
+        ));
         let after = fs::read(manifest_path(&config.state_root, &record.machine_id))?;
         assert_ne!(after, before);
         let persisted: MachineRecord = serde_json::from_slice(&after)?;

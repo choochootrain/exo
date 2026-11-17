@@ -272,7 +272,10 @@ print('verified-{gib}-GiB')
 async fn live_cpu_large_topology_keeps_the_small_initial_grant() -> Result<()> {
     let temp = tempfile::Builder::new().prefix("cpus-").tempdir()?;
     let image = std::env::var("FIRECRACKER_IMAGE")?;
-    ensure!(balloon::kvm_capability(66)? >= 64, "KVM needs 64 vCPUs");
+    ensure!(
+        balloon::kvm_capability(balloon::KVM_CAP_MAX_VCPUS)? >= 64,
+        "KVM needs 64 vCPUs"
+    );
     let config = FirecrackerConfig {
         state_root: temp.path().join("s"),
         allowed_local_images: vec![image.clone().into()],
