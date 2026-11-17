@@ -606,7 +606,7 @@ async fn live_memory_shared_ceiling_accepts_small_and_odd_sized_requests() -> Re
             assert_eq!(
                 handle.live_resource_ceiling(),
                 SandboxResourceShape::new(
-                    1,
+                    backend.shared.host_fingerprint.cpu_ceiling.unwrap(),
                     backend
                         .shared
                         .host_fingerprint
