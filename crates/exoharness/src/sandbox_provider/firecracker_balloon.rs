@@ -53,9 +53,7 @@ pub(super) fn validate_grant(
     let ceiling = ceiling(runtime).context("invalid Firecracker resource capacity")?;
     runtime.validate_memory_grant(grant.memory_mib.get())?;
     ensure!(
-        ceiling.vcpu_count.get() <= MAX_VCPU_COUNT
-            && grant.vcpu_count.get() >= runtime.vcpu_count
-            && grant.vcpu_count <= ceiling.vcpu_count,
+        grant.vcpu_count.get() >= runtime.vcpu_count && grant.vcpu_count <= ceiling.vcpu_count,
         "Firecracker resource grant must grow within the running VM's capacity"
     );
     Ok(())
@@ -79,8 +77,8 @@ pub(super) fn grant(record: &MachineRecord) -> Result<u32> {
     Ok(resources(record)?.memory_mib.get())
 }
 
-pub(super) fn cpu_quota(vcpus: u8) -> String {
-    format!("{} 100000", u32::from(vcpus) * 100_000)
+pub(super) fn cpu_quota(vcpus: u16) -> String {
+    format!("{} 100000", u64::from(vcpus) * 100_000)
 }
 
 pub(super) fn kvm_capability(capability: libc::c_int) -> Result<u32> {
@@ -422,7 +420,9 @@ mod tests {
             SandboxResourceShape::new(2, 8192).unwrap(),
         )
         .unwrap_err();
-        assert!(matches!(error, crate::SandboxError::Internal(error) if error.downcast_ref::<std::io::Error>().is_some()));
+        assert!(
+            matches!(error, crate::SandboxError::Internal(error) if error.downcast_ref::<std::io::Error>().is_some())
+        );
         let after = fs::read(manifest_path(&config.state_root, &record.machine_id))?;
         assert_ne!(after, before);
         let persisted: MachineRecord = serde_json::from_slice(&after)?;
@@ -480,7 +480,10 @@ mod tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 let (request, body) = super::super::tests::read_api_request(&mut stream).unwrap();
                 assert!(request.starts_with(path), "{request}");
-                assert_eq!(fs::read_to_string(cgroup_for_peer.join("cpu.max")).unwrap(), cpu_quota(4));
+                assert_eq!(
+                    fs::read_to_string(cgroup_for_peer.join("cpu.max")).unwrap(),
+                    cpu_quota(4)
+                );
                 assert_eq!(
                     fs::read_to_string(cgroup_for_peer.join("memory.max")).unwrap(),
                     ((8192_u64 + 1024) * 1024 * 1024).to_string()
@@ -510,7 +513,9 @@ mod tests {
             }
         });
         let resources = SandboxResourceShape::new(4, 8192).unwrap();
-        assert!(matches!(apply_grant(&config, &record, &cgroup, resources).unwrap(), crate::SandboxResourceUpdate::Incomplete { reservation, cpu: crate::SandboxResourceUpdateStatus::Confirmed, memory: crate::SandboxResourceUpdateStatus::Unconfirmed, .. } if reservation == resources));
+        assert!(
+            matches!(apply_grant(&config, &record, &cgroup, resources).unwrap(), crate::SandboxResourceUpdate::Incomplete { reservation, cpu: crate::SandboxResourceUpdateStatus::Confirmed, memory: crate::SandboxResourceUpdateStatus::Unconfirmed, .. } if reservation == resources)
+        );
         let record: MachineRecord = serde_json::from_slice(
             &fs::read(manifest_path(&config.state_root, &record.machine_id)).unwrap(),
         )
@@ -524,7 +529,9 @@ mod tests {
         );
         assert_eq!(record.runtime.memory_mib, 4096);
         assert_eq!(grant(&record).unwrap(), 8192);
-        assert!(matches!(apply_grant(&config, &record, &cgroup, resources).unwrap(), crate::SandboxResourceUpdate::Applied { grant } if grant == resources));
+        assert!(
+            matches!(apply_grant(&config, &record, &cgroup, resources).unwrap(), crate::SandboxResourceUpdate::Applied { grant } if grant == resources)
+        );
         peer.join().unwrap();
         assert_eq!(grant(&record).unwrap(), 8192);
         assert_eq!(configuration(&record).unwrap().unwrap().amount_mib, 0);

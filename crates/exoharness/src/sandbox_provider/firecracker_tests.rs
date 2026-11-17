@@ -28,6 +28,7 @@ pub(super) fn read_api_request(stream: &mut StdUnixStream) -> Result<(String, Ve
 
 fn test_host_runtime() -> FirecrackerHostFingerprint {
     FirecrackerHostFingerprint {
+        max_vcpu_count: 512,
         cpu_ceiling: None,
         memory_ceiling_mib: None,
         memory_slot_size_mib: None,
@@ -93,7 +94,7 @@ fn guest_root_policy_changes_runtime_and_snapshot_identity() {
 #[test]
 fn firecracker_validates_provider_specific_resource_limits() {
     validate_resource_shape(SandboxResourceShape::new(1, 128).unwrap()).unwrap();
-    assert!(validate_resource_shape(SandboxResourceShape::new(33, 4096).unwrap()).is_err());
+    validate_resource_shape(SandboxResourceShape::new(512, 4096).unwrap()).unwrap();
     assert!(validate_resource_shape(SandboxResourceShape::new(1, 127).unwrap()).is_err());
 }
 
@@ -780,7 +781,7 @@ fn explicit_snapshots_are_unique_and_reusable() {
     assert_eq!(decoded.format_version, SNAPSHOT_FORMAT_VERSION);
     assert_eq!(decoded.source_network_slot, 7);
     validate_snapshot_key(&decoded.template_key).unwrap();
-    for cpu_capacity in [0, MAX_VCPU_COUNT + 1] {
+    for cpu_capacity in [0, 1] {
         let mut invalid = manifest.clone();
         invalid.runtime.cpu_ceiling = Some(cpu_capacity);
         invalid.resource_grant = SandboxResourceShape::new(2, invalid.runtime.memory_mib);

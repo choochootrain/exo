@@ -62,7 +62,7 @@ fn assert_balloon(config: &FirecrackerConfig, record: &MachineRecord, mib: u32) 
 async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> {
     let temp = tempfile::Builder::new().prefix("m").tempdir()?;
     let image = std::env::var("FIRECRACKER_IMAGE")?;
-    let mut config = config(temp.path(), &image);
+    let config = config(temp.path(), &image);
     let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
     let mut request = native_request(&config, "growth", &image)?;
     request.spec.resources = SandboxResourceShape::new(1, 4096);

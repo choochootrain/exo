@@ -175,6 +175,11 @@ New memory is automatically onlined with its metadata in the added memory,
 so a large growth range does not consume the initial grant at boot.
 Boot RAM uses transparent huge pages when growth is enabled.
 
+CPU capacity is detected from the host's available parallelism and KVM's limit.
+The guest sees that CPU topology at boot; a CPU-time quota initially enforces
+the requested grant and increases without restarting guest processes.
+CPU counts use 16 bits, allowing node sizes above the former 32-vCPU limit.
+
 Call `host_resource_reservation` on the backend before acquisition or growth.
 It returns the full host reservation: guest grant plus 1024 MiB. The cgroup
 hard limit enforces that reservation, reclaim starts at grant plus 256 MiB,
@@ -183,11 +188,14 @@ the whole headroom; the balloon's page counts are guest-reported.
 See Firecracker's [hotplug](https://github.com/firecracker-microvm/firecracker/blob/v1.18.0/docs/memory-hotplug.md)
 and [balloon security guidance](https://github.com/firecracker-microvm/firecracker/blob/v1.18.0/docs/ballooning.md#security-disclaimer).
 
-Growth persists the grant and raises host limits before adding guest memory.
-Shrinking and over-capacity requests are rejected. Retain the
-reservation after an error or disconnect until `live_resource_grant` reconciles
-it or terminate the VM; retrying the same target is safe. Filesystem and RAM
-captures retain the grant separately from request identity.
+Pass an absolute CPU/memory target to `expand_resources` after reserving capacity.
+Shrinking and over-capacity requests are rejected before mutation.
+`SandboxResourceUpdate::Applied` confirms the limits and memory convergence;
+`Incomplete` reports per-resource confirmation and the guest reservation to retain.
+Use `host_resource_reservation` to include host overhead in that reservation.
+Reconcile with `live_resource_grant` or terminate the VM before releasing capacity;
+retrying the same target is safe after failure or cancellation. Filesystem and RAM
+captures retain both grants separately from request identity.
 One convergence deadline covers hotplug and balloon adjustment: 30 seconds plus
 one second per 128 MiB of the target grant. Each API wait is capped at the lesser
 of five seconds and the remaining budget; convergence is polled every 100 ms.

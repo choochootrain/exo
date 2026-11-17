@@ -95,7 +95,6 @@ const GUEST_AGENT_PORT: u32 = 10_052;
 // https://github.com/firecracker-microvm/firecracker/blob/main/docs/vsock.md#guest-initiated-connections
 const GUEST_READY_HOST_PORT: u32 = 10_053;
 const MAX_RESOURCE_SLOTS: u32 = 32_768;
-const MAX_VCPU_COUNT: u8 = 32;
 const NETWORK_BASE: Ipv4Addr = Ipv4Addr::new(10, 240, 0, 0);
 const EXO_NETWORK_CIDR: &str = "10.240.0.0/14";
 /// Host capacity to reserve in addition to each Firecracker guest memory grant.
@@ -112,7 +111,7 @@ pub const DEFAULT_IMAGE_SIZE_GIB: u64 = 8;
 pub const DEFAULT_NETWORK_BYTES_PER_SECOND: u64 = 100 * 1024 * 1024;
 pub const DEFAULT_SNAPSHOT_BUDGET_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 pub const DEFAULT_JAILER_UID_BASE: u32 = 100_000;
-pub const DEFAULT_VCPU_COUNT: u8 = crate::DEFAULT_SANDBOX_VCPU_COUNT;
+pub const DEFAULT_VCPU_COUNT: u16 = crate::DEFAULT_SANDBOX_VCPU_COUNT;
 pub const DEFAULT_MEMORY_MIB: u32 = crate::DEFAULT_SANDBOX_MEMORY_MIB;
 const SNAPSHOT_FORMAT_VERSION: u32 = 2;
 static CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 2] = [
@@ -296,14 +295,14 @@ struct FirecrackerRuntimeFingerprint {
     jailer_sha256: String,
     kernel_sha256: String,
     initramfs_sha256: String,
-    vcpu_count: u8,
+    vcpu_count: u16,
     memory_mib: u32,
     #[serde(default)]
     memory_ceiling_mib: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     memory_slot_size_mib: Option<u32>,
     #[serde(default)]
-    cpu_ceiling: Option<u8>,
+    cpu_ceiling: Option<u16>,
     #[serde(default)]
     network_device_policy: FirecrackerNetworkDevicePolicy,
     #[serde(default)]
@@ -365,7 +364,8 @@ impl FirecrackerRuntimeFingerprint {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FirecrackerHostFingerprint {
-    cpu_ceiling: Option<u8>,
+    max_vcpu_count: u16,
+    cpu_ceiling: Option<u16>,
     memory_ceiling_mib: Option<std::num::NonZeroU32>,
     memory_slot_size_mib: Option<u32>,
     architecture: String,
@@ -382,6 +382,17 @@ struct FirecrackerHostFingerprint {
 
 impl FirecrackerHostFingerprint {
     fn validate_resources(&self, resources: SandboxResourceShape) -> Result<()> {
+        ensure!(
+            resources.vcpu_count.get() <= self.max_vcpu_count,
+            "requested CPUs exceed KVM capacity {}",
+            self.max_vcpu_count
+        );
+        if let Some(cpu) = self.cpu_ceiling {
+            ensure!(
+                resources.vcpu_count.get() <= cpu,
+                "requested CPUs exceed node capacity {cpu}"
+            );
+        }
         if let Some(memory) = self.memory_ceiling_mib {
             ensure!(
                 resources.memory_mib <= memory,
@@ -476,7 +487,10 @@ impl FirecrackerSnapshotManifest {
                     && self.runtime.memory_ceiling_mib.is_none()),
             "Firecracker live snapshot is missing its resource grant"
         );
-        self.runtime.validate_memory_grant(self.resource_grant.map_or(self.runtime.memory_mib, |grant| grant.memory_mib.get()))?;
+        self.runtime.validate_memory_grant(
+            self.resource_grant
+                .map_or(self.runtime.memory_mib, |grant| grant.memory_mib.get()),
+        )?;
         if let Some(grant) = self.resource_grant {
             balloon::validate_grant(&self.runtime, grant)?;
         }
@@ -632,7 +646,7 @@ struct FirecrackerDrive {
 
 #[derive(Serialize)]
 struct FirecrackerMachineConfiguration {
-    vcpu_count: u8,
+    vcpu_count: u16,
     mem_size_mib: u32,
     smt: bool,
     track_dirty_pages: bool,
@@ -3000,6 +3014,7 @@ fn firecracker_host_fingerprint(
     config: &FirecrackerConfig,
     firecracker_version: String,
 ) -> Result<FirecrackerHostFingerprint> {
+    let max_vcpu_count = u16::try_from(balloon::kvm_capability(66)?)?;
     let memory_ceiling_mib = config
         .live_resource_growth
         .then(balloon::host_memory_capacity)
@@ -3016,11 +3031,13 @@ fn firecracker_host_fingerprint(
         })
         .transpose()?;
     Ok(FirecrackerHostFingerprint {
+        max_vcpu_count,
         cpu_ceiling: if config.live_resource_growth {
             Some(
                 std::thread::available_parallelism()?
                     .get()
-                    .min(usize::from(MAX_VCPU_COUNT)) as u8,
+                    .min(usize::from(max_vcpu_count))
+                    .try_into()?,
             )
         } else {
             None
@@ -3041,9 +3058,6 @@ fn firecracker_host_fingerprint(
 }
 
 fn validate_resource_shape(resources: SandboxResourceShape) -> Result<()> {
-    if resources.vcpu_count.get() > MAX_VCPU_COUNT {
-        bail!("Firecracker vCPU count must be between 1 and 32");
-    }
     if resources.memory_mib.get() < 128 {
         bail!("Firecracker memory must be at least 128 MiB");
     }
@@ -3334,10 +3348,16 @@ fn hash_runtime_fingerprint(hasher: &mut Sha256, runtime: &FirecrackerRuntimeFin
     hash_snapshot_string(hasher, &runtime.jailer_sha256);
     hash_snapshot_string(hasher, &runtime.kernel_sha256);
     hash_snapshot_string(hasher, &runtime.initramfs_sha256);
-    hasher.update(runtime.vcpu_count.to_le_bytes());
+    // Keep identities of existing main-branch resource shapes unchanged.
+    if let Ok(vcpus) = u8::try_from(runtime.vcpu_count) {
+        hasher.update([vcpus]);
+    } else {
+        hash_snapshot_string(hasher, "vcpu_count_u16");
+        hasher.update(runtime.vcpu_count.to_le_bytes());
+    }
     if let Some(ceiling) = runtime.cpu_ceiling {
         hash_snapshot_string(hasher, "cpu_ceiling");
-        hasher.update([ceiling]);
+        hasher.update(ceiling.to_le_bytes());
     }
     hasher.update(runtime.memory_mib.to_le_bytes());
     if let Some(slot) = runtime.memory_slot_size_mib {
