@@ -299,7 +299,7 @@ impl FirecrackerArgs {
             allowed_registries: self.allowed_registries.clone(),
             network_bytes_per_second: self.network_bytes_per_second,
             max_machines: self.max_machines,
-            memory_ceiling_mib: None,
+            live_resource_growth: false,
         };
         #[cfg(target_os = "macos")]
         let lima = FirecrackerLimaConfig {

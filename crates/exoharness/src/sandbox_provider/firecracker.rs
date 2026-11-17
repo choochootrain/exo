@@ -221,12 +221,11 @@ pub struct FirecrackerConfig {
     /// https://github.com/firecracker-microvm/firecracker/blob/main/docs/design.md#L23-L24
     /// https://github.com/firecracker-microvm/firecracker/blob/main/docs/design.md#L71-L72
     pub max_machines: Option<NonZeroUsize>,
-    /// Opt in to live memory growth by booting with a balloon at this ceiling.
-    /// OOM deflation is disabled. The balloon requires a cooperative guest;
-    /// reserve the grant plus FIRECRACKER_MEMORY_HEADROOM_MIB on the host.
-    /// Large ceilings add guest/kernel overhead even before growth.
+    /// Opt in to live growth up to the host's CPU and memory capacity.
+    /// The requested shape remains the initial grant. Reserve backend host
+    /// overhead as well as the grant before requesting growth.
     #[serde(default)]
-    pub memory_ceiling_mib: Option<std::num::NonZeroU32>,
+    pub live_resource_growth: bool,
 }
 
 impl Default for FirecrackerConfig {
@@ -251,7 +250,7 @@ impl Default for FirecrackerConfig {
             allowed_registries: Vec::new(),
             network_bytes_per_second: DEFAULT_NETWORK_BYTES_PER_SECOND,
             max_machines: None,
-            memory_ceiling_mib: None,
+            live_resource_growth: false,
         }
     }
 }
@@ -300,6 +299,8 @@ struct FirecrackerRuntimeFingerprint {
     memory_mib: u32,
     #[serde(default)]
     memory_ceiling_mib: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_slot_size_mib: Option<u32>,
     #[serde(default)]
     network_device_policy: FirecrackerNetworkDevicePolicy,
     #[serde(default)]
@@ -310,13 +311,50 @@ struct FirecrackerRuntimeFingerprint {
 
 impl FirecrackerRuntimeFingerprint {
     fn boot_memory_mib(&self) -> u32 {
-        self.memory_ceiling_mib.unwrap_or(self.memory_mib)
+        if self.memory_ceiling_mib.is_some() {
+            self.memory_mib.div_ceil(2) * 2
+        } else {
+            self.memory_mib
+        }
+    }
+
+    fn hotplug_memory_mib(&self) -> u32 {
+        self.memory_ceiling_mib.map_or(0, |ceiling| {
+            let slot = self.memory_slot_size_mib.unwrap_or(128);
+            ceiling
+                .saturating_sub(self.boot_memory_mib())
+                .div_ceil(slot)
+                * slot
+        })
+    }
+
+    fn mapped_memory_mib(&self) -> u32 {
+        self.boot_memory_mib() + self.hotplug_memory_mib()
+    }
+
+    fn physical_memory_mib(&self, grant: u32) -> u32 {
+        self.boot_memory_mib().max(grant.div_ceil(2) * 2)
     }
 
     fn validate_memory_grant(&self, grant: u32) -> Result<()> {
         ensure!(
-            grant > 0 && grant >= self.memory_mib && grant <= self.boot_memory_mib(),
+            grant > 0
+                && grant >= self.memory_mib
+                && grant <= self.memory_ceiling_mib.unwrap_or(self.memory_mib),
             "invalid Firecracker memory grant"
+        );
+        let slot = self.memory_slot_size_mib.unwrap_or(128);
+        ensure!(
+            slot >= 128 && slot.is_power_of_two(),
+            "invalid Firecracker hotplug slot size"
+        );
+        let boot = u64::from(self.memory_mib).div_ceil(2) * 2;
+        let ceiling = u64::from(self.memory_ceiling_mib.unwrap_or(self.memory_mib));
+        let mapped =
+            boot + ceiling.saturating_sub(boot).div_ceil(u64::from(slot)) * u64::from(slot);
+        ensure!(
+            mapped <= u64::from(u32::MAX),
+            "Firecracker memory range overflow"
         );
         Ok(())
     }
@@ -325,6 +363,7 @@ impl FirecrackerRuntimeFingerprint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FirecrackerHostFingerprint {
     memory_ceiling_mib: Option<std::num::NonZeroU32>,
+    memory_slot_size_mib: Option<u32>,
     architecture: String,
     protocol_version: u32,
     firecracker_version: String,
@@ -349,6 +388,7 @@ impl FirecrackerHostFingerprint {
             initramfs_sha256: self.initramfs_sha256.clone(),
             vcpu_count: resources.vcpu_count.get(),
             memory_mib: resources.memory_mib.get(),
+            memory_slot_size_mib: self.memory_slot_size_mib,
             memory_ceiling_mib: self
                 .memory_ceiling_mib
                 .map(|ceiling| ceiling.get().max(resources.memory_mib.get())),
@@ -415,9 +455,10 @@ impl FirecrackerSnapshotManifest {
             );
         }
         validate_snapshot_key(&self.template_key)?;
-        if let Some(memory) = self.memory_grant_mib {
-            self.runtime.validate_memory_grant(memory.get())?;
-        }
+        self.runtime.validate_memory_grant(
+            self.memory_grant_mib
+                .map_or(self.runtime.memory_mib, std::num::NonZeroU32::get),
+        )?;
         if self.source_network_slot >= MAX_RESOURCE_SLOTS {
             bail!(
                 "invalid Firecracker snapshot source network slot: {}",
@@ -542,6 +583,8 @@ struct FirecrackerVmConfiguration {
     entropy: FirecrackerEntropy,
     #[serde(skip_serializing_if = "Option::is_none")]
     balloon: Option<balloon::Configuration>,
+    #[serde(rename = "memory-hotplug", skip_serializing_if = "Option::is_none")]
+    memory_hotplug: Option<balloon::HotplugConfiguration>,
 }
 
 #[derive(Serialize)]
@@ -1340,7 +1383,7 @@ impl FirecrackerSandboxBackend {
             let capacity_reservation = self.shared.reserve_machine_capacity(&machine_id).await?;
             let config = self.shared.config.clone();
             let key = template_key.clone();
-            let memory_mib = manifest.runtime.boot_memory_mib();
+            let memory_mib = manifest.runtime.mapped_memory_mib();
             let template_ready = tokio::task::spawn_blocking(move || {
                 snapshot_template_ready(&config, &key, memory_mib)
             })
@@ -1590,6 +1633,13 @@ impl FirecrackerSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for FirecrackerSandboxBackend {
+    fn host_resource_reservation(
+        &self,
+        resources: SandboxResourceShape,
+    ) -> Result<SandboxResourceShape> {
+        firecracker_host_reservation(resources)
+    }
+
     fn with_external_proxy(
         &self,
         proxy: crate::egress::ExternalProxyConfig,
@@ -2260,6 +2310,12 @@ impl Shared {
         let reusing_existing_machine = existing
             .as_ref()
             .is_some_and(|record| record.spec_hash == spec_hash && record.runtime == runtime);
+        let memory = if reusing_existing_machine {
+            balloon::grant(existing.as_ref().context("missing existing allocation")?)?
+        } else {
+            runtime.memory_mib
+        };
+        let deadline = balloon::deadline(memory);
         if let Some(record) = existing.as_ref() {
             if record.spec_hash != spec_hash || record.runtime != runtime {
                 self.cleanup_machine(machine_id, true).await?;
@@ -2292,7 +2348,7 @@ impl Shared {
                         .await??;
                     }
 
-                    self.initialize_balloon(&machine.record).await?;
+                    self.initialize_balloon(&machine.record, deadline).await?;
                     return Ok(machine);
                 }
                 self.cleanup_machine(machine_id, false).await?;
@@ -2329,7 +2385,7 @@ impl Shared {
             GuestClient::new(Arc::clone(self), machine.vsock_path.clone())
                 .sync_clock()
                 .await?;
-            self.initialize_balloon(&machine.record).await?;
+            self.initialize_balloon(&machine.record, deadline).await?;
             Ok::<_, anyhow::Error>(())
         }
         .await;
@@ -2380,13 +2436,13 @@ impl Shared {
         Ok(machine)
     }
 
-    async fn initialize_balloon(&self, record: &MachineRecord) -> Result<()> {
+    async fn initialize_balloon(&self, record: &MachineRecord, deadline: Instant) -> Result<()> {
         if record.runtime.memory_ceiling_mib.is_some() {
             let config = self.config.clone();
             let record = record.clone();
             let span = tracing::Span::current();
             tokio::task::spawn_blocking(move || {
-                span.in_scope(|| balloon::initialize(&config, &record))
+                span.in_scope(|| balloon::initialize_until(&config, &record, deadline))
             })
             .await??;
         }
@@ -2887,7 +2943,7 @@ fn validate_host_blocking(config: &FirecrackerConfig) -> Result<String> {
             "Firecracker and jailer versions must match: {firecracker_version} != {jailer_version}"
         );
     }
-    if config.memory_ceiling_mib.is_some() {
+    if config.live_resource_growth {
         ensure!(
             semver::Version::parse(firecracker_version.trim_start_matches('v'))?
                 >= semver::Version::new(1, 17, 0),
@@ -2901,8 +2957,24 @@ fn firecracker_host_fingerprint(
     config: &FirecrackerConfig,
     firecracker_version: String,
 ) -> Result<FirecrackerHostFingerprint> {
+    let memory_ceiling_mib = config
+        .live_resource_growth
+        .then(balloon::host_memory_capacity)
+        .transpose()?;
+    let memory_slot_size_mib = memory_ceiling_mib
+        .map(|capacity| {
+            // Leave slots for boot RAM and architectural devices; the remaining
+            // region uses the smallest power-of-two slots supported by this host.
+            let slots = balloon::kvm_capability(10)?
+                .checked_sub(8)
+                .filter(|slots| *slots > 0)
+                .context("KVM has too few memory slots")?;
+            Ok::<_, anyhow::Error>(capacity.get().div_ceil(slots).next_power_of_two().max(128))
+        })
+        .transpose()?;
     Ok(FirecrackerHostFingerprint {
-        memory_ceiling_mib: config.memory_ceiling_mib,
+        memory_ceiling_mib,
+        memory_slot_size_mib,
         architecture: std::env::consts::ARCH.to_string(),
         protocol_version: PROTOCOL_VERSION,
         firecracker_version,
@@ -3212,6 +3284,10 @@ fn hash_runtime_fingerprint(hasher: &mut Sha256, runtime: &FirecrackerRuntimeFin
     hash_snapshot_string(hasher, &runtime.initramfs_sha256);
     hasher.update(runtime.vcpu_count.to_le_bytes());
     hasher.update(runtime.memory_mib.to_le_bytes());
+    if let Some(slot) = runtime.memory_slot_size_mib {
+        hash_snapshot_string(hasher, "memory_slot_size_mib");
+        hasher.update(slot.to_le_bytes());
+    }
     if let Some(ceiling) = runtime.memory_ceiling_mib {
         hasher.update(ceiling.to_le_bytes());
     }
@@ -4407,6 +4483,16 @@ fn resource_disk(
     Ok(disk)
 }
 
+fn firecracker_host_reservation(resources: SandboxResourceShape) -> Result<SandboxResourceShape> {
+    Ok(SandboxResourceShape {
+        memory_mib: resources
+            .memory_mib
+            .checked_add(FIRECRACKER_MEMORY_HEADROOM_MIB as u32)
+            .context("Firecracker host memory reservation overflow")?,
+        ..resources
+    })
+}
+
 #[tracing::instrument(name = "firecracker.launch_vmm", skip_all)]
 fn spawn_jailed_firecracker(
     config: &FirecrackerConfig,
@@ -4416,7 +4502,10 @@ fn spawn_jailed_firecracker(
 ) -> Result<()> {
     let host_uid = jailer_uid(config, record)?;
     let memory_mib = balloon::grant(record)?;
-    let memory_max = (u64::from(memory_mib) + FIRECRACKER_MEMORY_HEADROOM_MIB) * 1024 * 1024;
+    let resources = SandboxResourceShape::new(record.runtime.vcpu_count, memory_mib)
+        .context("invalid Firecracker grant")?;
+    let memory_max =
+        u64::from(firecracker_host_reservation(resources)?.memory_mib.get()) * 1024 * 1024;
     // Guest RAM is anonymous memory in the VMM. Block-device page cache and
     // kernel allocations also count against this cgroup. Start reclaim before
     // the hard limit, with room for disk writeback to complete at full guest RAM.
@@ -4510,6 +4599,9 @@ fn firecracker_vm_configuration(
         String::from("reboot=k panic=1 pci=off rdinit=/init 8250.nr_uarts=0 quiet loglevel=1");
     if record.runtime.allow_guest_root {
         boot_args.push_str(" exo_allow_guest_root=1");
+    }
+    if record.runtime.memory_ceiling_mib.is_some() {
+        boot_args.push_str(" memory_hotplug.memmap_on_memory=1 memhp_default_state=online");
     }
     if record.network_enabled {
         boot_args.push_str(&format!(
@@ -4615,6 +4707,7 @@ fn firecracker_vm_configuration(
     };
     Ok(FirecrackerVmConfiguration {
         balloon: balloon::configuration(record)?,
+        memory_hotplug: balloon::hotplug_configuration(&record.runtime),
         boot_source: FirecrackerBootSource {
             kernel_image_path: "/vmlinux",
             initrd_path: "/initramfs.cpio",
@@ -5188,11 +5281,14 @@ fn capture_snapshot_template(
     reap_orphaned_fork_snapshot_templates_blocking(config)?;
     let root = jail_root(config, &source.machine_id);
     let disk_bytes = fs::metadata(root.join("overlay.ext4"))?.len();
-    let memory_mib = source.runtime.boot_memory_mib();
-    // Balloon inflation does not clear KVM's dirty bitmap. A first capture can
-    // write pages dirtied during ceiling-sized boot, even after reclamation;
-    // reserve for the dirty delta and merged image, not just the current grant.
-    let capture_bytes = u64::from(memory_mib)
+    let memory_mib = source.runtime.mapped_memory_mib();
+    // Untouched hotplug slots remain sparse. A partially plugged slot is fully
+    // accessible to the guest, so include its unused tail in the dirty budget.
+    let boot = source.runtime.boot_memory_mib();
+    let slot = source.runtime.memory_slot_size_mib.unwrap_or(128);
+    let hotplugged = source.runtime.physical_memory_mib(balloon::grant(source)?) - boot;
+    let dirty_memory_mib = boot + hotplugged.div_ceil(slot) * slot;
+    let capture_bytes = u64::from(dirty_memory_mib)
         .checked_mul(1024 * 1024)
         .and_then(|bytes| bytes.checked_add(SNAPSHOT_STATE_RESERVE_BYTES))
         .and_then(|bytes| bytes.checked_mul(2))
