@@ -78,7 +78,7 @@ pub(super) fn grant(record: &MachineRecord) -> Result<u32> {
     Ok(resources(record)?.memory_mib.get())
 }
 
-pub(super) fn cpu_quota(vcpus: u16) -> String {
+pub(super) fn cpu_quota(vcpus: u8) -> String {
     format!("{} 100000", u64::from(vcpus) * 100_000)
 }
 

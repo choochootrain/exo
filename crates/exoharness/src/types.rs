@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
-use std::num::{NonZeroU16, NonZeroU32};
+use std::num::{NonZeroU8, NonZeroU32};
 use std::ops::Bound;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -814,20 +814,20 @@ pub struct DurableFileSystem {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct SandboxResourceShape {
-    pub vcpu_count: NonZeroU16,
+    pub vcpu_count: NonZeroU8,
     pub memory_mib: NonZeroU32,
 }
 
-pub const DEFAULT_SANDBOX_VCPU_COUNT: u16 = 2;
+pub const DEFAULT_SANDBOX_VCPU_COUNT: u8 = 2;
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULT_SANDBOX_MEMORY_MIB: u32 = 4096;
 #[cfg(target_os = "macos")]
 pub const DEFAULT_SANDBOX_MEMORY_MIB: u32 = 1024;
 
 impl SandboxResourceShape {
-    pub fn new(vcpu_count: u16, memory_mib: u32) -> Option<Self> {
+    pub fn new(vcpu_count: u8, memory_mib: u32) -> Option<Self> {
         Some(Self {
-            vcpu_count: NonZeroU16::new(vcpu_count)?,
+            vcpu_count: NonZeroU8::new(vcpu_count)?,
             memory_mib: NonZeroU32::new(memory_mib)?,
         })
     }
@@ -836,7 +836,7 @@ impl SandboxResourceShape {
 impl Default for SandboxResourceShape {
     fn default() -> Self {
         Self {
-            vcpu_count: NonZeroU16::new(DEFAULT_SANDBOX_VCPU_COUNT)
+            vcpu_count: NonZeroU8::new(DEFAULT_SANDBOX_VCPU_COUNT)
                 .expect("default sandbox vCPU count must be positive"),
             memory_mib: NonZeroU32::new(DEFAULT_SANDBOX_MEMORY_MIB)
                 .expect("default sandbox memory must be positive"),

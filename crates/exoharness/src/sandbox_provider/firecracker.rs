@@ -111,7 +111,7 @@ pub const DEFAULT_IMAGE_SIZE_GIB: u64 = 8;
 pub const DEFAULT_NETWORK_BYTES_PER_SECOND: u64 = 100 * 1024 * 1024;
 pub const DEFAULT_SNAPSHOT_BUDGET_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 pub const DEFAULT_JAILER_UID_BASE: u32 = 100_000;
-pub const DEFAULT_VCPU_COUNT: u16 = crate::DEFAULT_SANDBOX_VCPU_COUNT;
+pub const DEFAULT_VCPU_COUNT: u8 = crate::DEFAULT_SANDBOX_VCPU_COUNT;
 pub const DEFAULT_MEMORY_MIB: u32 = crate::DEFAULT_SANDBOX_MEMORY_MIB;
 const SNAPSHOT_FORMAT_VERSION: u32 = 2;
 static CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 2] = [
@@ -295,14 +295,14 @@ struct FirecrackerRuntimeFingerprint {
     jailer_sha256: String,
     kernel_sha256: String,
     initramfs_sha256: String,
-    vcpu_count: u16,
+    vcpu_count: u8,
     memory_mib: u32,
     #[serde(default)]
     memory_ceiling_mib: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     memory_slot_size_mib: Option<u32>,
     #[serde(default)]
-    cpu_ceiling: Option<u16>,
+    cpu_ceiling: Option<u8>,
     #[serde(default)]
     network_device_policy: FirecrackerNetworkDevicePolicy,
     #[serde(default)]
@@ -364,8 +364,8 @@ impl FirecrackerRuntimeFingerprint {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FirecrackerHostFingerprint {
-    max_vcpu_count: u16,
-    cpu_ceiling: Option<u16>,
+    max_vcpu_count: u8,
+    cpu_ceiling: Option<u8>,
     memory_ceiling_mib: Option<std::num::NonZeroU32>,
     memory_slot_size_mib: Option<u32>,
     architecture: String,
@@ -384,7 +384,7 @@ impl FirecrackerHostFingerprint {
     fn validate_resources(&self, resources: SandboxResourceShape) -> Result<()> {
         ensure!(
             resources.vcpu_count.get() <= self.max_vcpu_count,
-            "requested CPUs exceed KVM capacity {}",
+            "requested CPUs exceed Firecracker capacity {}",
             self.max_vcpu_count
         );
         if let Some(cpu) = self.cpu_ceiling {
@@ -646,7 +646,7 @@ struct FirecrackerDrive {
 
 #[derive(Serialize)]
 struct FirecrackerMachineConfiguration {
-    vcpu_count: u16,
+    vcpu_count: u8,
     mem_size_mib: u32,
     smt: bool,
     track_dirty_pages: bool,
@@ -3014,7 +3014,10 @@ fn firecracker_host_fingerprint(
     config: &FirecrackerConfig,
     firecracker_version: String,
 ) -> Result<FirecrackerHostFingerprint> {
-    let max_vcpu_count = u16::try_from(balloon::kvm_capability(balloon::KVM_CAP_MAX_VCPUS)?)?;
+    // Firecracker 1.18 itself caps KVM guests at 32 vCPUs, below KVM's limit.
+    // https://github.com/firecracker-microvm/firecracker/blob/v1.18.0/src/vmm/src/vstate/vm.rs
+    let max_vcpu_count =
+        u8::try_from(balloon::kvm_capability(balloon::KVM_CAP_MAX_VCPUS)?.min(32))?;
     let memory_ceiling_mib = config
         .live_resource_growth
         .then(balloon::host_memory_capacity)
@@ -3348,13 +3351,7 @@ fn hash_runtime_fingerprint(hasher: &mut Sha256, runtime: &FirecrackerRuntimeFin
     hash_snapshot_string(hasher, &runtime.jailer_sha256);
     hash_snapshot_string(hasher, &runtime.kernel_sha256);
     hash_snapshot_string(hasher, &runtime.initramfs_sha256);
-    // Keep identities of existing main-branch resource shapes unchanged.
-    if let Ok(vcpus) = u8::try_from(runtime.vcpu_count) {
-        hasher.update([vcpus]);
-    } else {
-        hash_snapshot_string(hasher, "vcpu_count_u16");
-        hasher.update(runtime.vcpu_count.to_le_bytes());
-    }
+    hasher.update(runtime.vcpu_count.to_le_bytes());
     if let Some(ceiling) = runtime.cpu_ceiling {
         hash_snapshot_string(hasher, "cpu_ceiling");
         hasher.update(ceiling.to_le_bytes());

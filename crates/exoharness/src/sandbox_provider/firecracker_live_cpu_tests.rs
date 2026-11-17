@@ -211,22 +211,11 @@ async fn live_cpu_and_memory_grow_from_small_request_to_node_capacity() -> Resul
         let gib = capacity.memory_mib.get() / 1024 - 2;
         let script = format!(
             r#"
-import mmap, os
+import mmap
 n = {gib} * 1024**3
-m = mmap.mmap(-1, n)
-workers = min(4, os.cpu_count())
-pids = []
-for i in range(workers):
-    pid = os.fork()
-    if pid == 0:
-        start = i * (n // workers // 4096) * 4096
-        end = (i + 1) * (n // workers // 4096) * 4096 if i + 1 < workers else n
-        m[start:end:4096] = bytes([173]) * ((end - start) // 4096)
-        assert m[start:end:4096] == bytes([173]) * ((end - start) // 4096)
-        os._exit(0)
-    pids.append(pid)
-for pid in pids:
-    assert os.waitpid(pid, 0)[1] == 0
+m = mmap.mmap(-1, n, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+m[::4096] = bytes([173]) * (n // 4096)
+assert m[::4096] == bytes([173]) * (n // 4096)
 print('verified-{gib}-GiB')
 "#
         );
@@ -268,13 +257,13 @@ print('verified-{gib}-GiB')
 }
 
 #[tokio::test]
-#[ignore = "requires root, KVM supporting 64 vCPUs, guest image, and XFS TMPDIR"]
+#[ignore = "requires root, KVM supporting 32 vCPUs, guest image, and XFS TMPDIR"]
 async fn live_cpu_large_topology_keeps_the_small_initial_grant() -> Result<()> {
     let temp = tempfile::Builder::new().prefix("cpus-").tempdir()?;
     let image = std::env::var("FIRECRACKER_IMAGE")?;
     ensure!(
-        balloon::kvm_capability(balloon::KVM_CAP_MAX_VCPUS)? >= 64,
-        "KVM needs 64 vCPUs"
+        balloon::kvm_capability(balloon::KVM_CAP_MAX_VCPUS)? >= 32,
+        "KVM needs 32 vCPUs"
     );
     let config = FirecrackerConfig {
         state_root: temp.path().join("s"),
@@ -288,7 +277,7 @@ async fn live_cpu_large_topology_keeps_the_small_initial_grant() -> Result<()> {
     Arc::get_mut(&mut backend.shared)
         .context("backend unexpectedly shared")?
         .host_fingerprint
-        .cpu_ceiling = Some(64);
+        .cpu_ceiling = Some(32);
     let mut request = native_request(&config, "large-topology", &image)?;
     request.spec.resources = SandboxResourceShape::new(1, 2048);
     let exercise = async {
@@ -296,7 +285,7 @@ async fn live_cpu_large_topology_keeps_the_small_initial_grant() -> Result<()> {
         assert_eq!(handle.live_resource_grant().await?, request.spec.resources);
         assert_eq!(
             shell(&handle, "getconf _NPROCESSORS_ONLN").await?.trim(),
-            "64"
+            "32"
         );
         let id = backend.shared.warm_machines.lock().await[&request.sandbox_id]
             .machine_id

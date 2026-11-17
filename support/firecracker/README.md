@@ -175,10 +175,10 @@ New memory is automatically onlined with its metadata in the added memory,
 so a large growth range does not consume the initial grant at boot.
 Boot RAM uses transparent huge pages when growth is enabled.
 
-CPU capacity is detected from the host's available parallelism and KVM's limit.
+CPU capacity is detected from the host's available parallelism, KVM's limit,
+and Firecracker 1.18's 32-vCPU maximum.
 The guest sees that CPU topology at boot; a CPU-time quota initially enforces
 the requested grant and increases without restarting guest processes.
-CPU counts use 16 bits, allowing node sizes above the former 32-vCPU limit.
 
 Call `host_resource_reservation` on the backend before acquisition or growth.
 It returns the full host reservation: guest grant plus 1024 MiB. The cgroup

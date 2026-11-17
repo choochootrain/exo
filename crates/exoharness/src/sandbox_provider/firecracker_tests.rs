@@ -28,7 +28,7 @@ pub(super) fn read_api_request(stream: &mut StdUnixStream) -> Result<(String, Ve
 
 fn test_host_runtime() -> FirecrackerHostFingerprint {
     FirecrackerHostFingerprint {
-        max_vcpu_count: 512,
+        max_vcpu_count: 32,
         cpu_ceiling: None,
         memory_ceiling_mib: None,
         memory_slot_size_mib: None,
@@ -94,8 +94,15 @@ fn guest_root_policy_changes_runtime_and_snapshot_identity() {
 #[test]
 fn firecracker_validates_provider_specific_resource_limits() {
     validate_resource_shape(SandboxResourceShape::new(1, 128).unwrap()).unwrap();
-    validate_resource_shape(SandboxResourceShape::new(512, 4096).unwrap()).unwrap();
+    validate_resource_shape(SandboxResourceShape::new(32, 4096).unwrap()).unwrap();
     assert!(validate_resource_shape(SandboxResourceShape::new(1, 127).unwrap()).is_err());
+    let host = test_host_runtime();
+    host.validate_resources(SandboxResourceShape::new(32, 4096).unwrap())
+        .unwrap();
+    assert!(
+        host.validate_resources(SandboxResourceShape::new(33, 4096).unwrap())
+            .is_err()
+    );
 }
 
 #[test]
@@ -1146,7 +1153,7 @@ async fn snapshot_grant_is_part_of_the_allocation_without_changing_its_identity(
     Arc::get_mut(&mut shared)
         .unwrap()
         .host_fingerprint
-        .cpu_ceiling = Some(512);
+        .cpu_ceiling = Some(32);
     let request = FirecrackerRequest::from(SandboxRequest {
         sandbox_id: "grant".into(),
         scope: crate::ResourceScope::Global,
@@ -1190,7 +1197,7 @@ async fn snapshot_grant_is_part_of_the_allocation_without_changing_its_identity(
             "fc-grant",
             "spec",
             None,
-            SandboxResourceShape::new(384, 8192),
+            SandboxResourceShape::new(32, 8192),
         )
         .await?;
     let persisted = shared
@@ -1201,7 +1208,7 @@ async fn snapshot_grant_is_part_of_the_allocation_without_changing_its_identity(
     assert_eq!(persisted.spec_hash, "spec");
     assert_eq!(
         balloon::resources(&persisted)?,
-        SandboxResourceShape::new(384, 8192).unwrap()
+        SandboxResourceShape::new(32, 8192).unwrap()
     );
     assert_eq!(persisted.runtime.vcpu_count, 1);
     assert_eq!(
