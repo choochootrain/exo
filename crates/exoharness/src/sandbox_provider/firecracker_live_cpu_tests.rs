@@ -284,7 +284,9 @@ async fn live_cpu_large_topology_keeps_the_small_initial_grant() -> Result<()> {
         let handle = backend.acquire(request.clone()).await?;
         assert_eq!(handle.live_resource_grant().await?, request.spec.resources);
         assert_eq!(
-            shell(&handle, "getconf _NPROCESSORS_ONLN").await?.trim(),
+            shell(&handle, "python3 -c 'import os; print(os.cpu_count())'")
+                .await?
+                .trim(),
             "32"
         );
         let id = backend.shared.warm_machines.lock().await[&request.sandbox_id]

@@ -550,8 +550,11 @@ mod tests {
         );
         assert_eq!(record.runtime.memory_mib, 4096);
         assert_eq!(grant(&record).unwrap(), 8192);
+        let update = apply_grant(&config, &record, &cgroup, resources).unwrap();
         assert!(
-            matches!(apply_grant(&config, &record, &cgroup, resources).unwrap(), crate::SandboxResourceUpdate::Applied { grant } if grant == resources)
+            matches!(&update,
+            crate::SandboxResourceUpdate::Applied { grant } if *grant == resources),
+            "{update:?}"
         );
         peer.join().unwrap();
         assert_eq!(grant(&record).unwrap(), 8192);
