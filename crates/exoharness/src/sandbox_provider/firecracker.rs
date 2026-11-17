@@ -411,9 +411,7 @@ impl FirecrackerHostFingerprint {
             jailer_sha256: self.jailer_sha256.clone(),
             kernel_sha256: self.kernel_sha256.clone(),
             initramfs_sha256: self.initramfs_sha256.clone(),
-            cpu_ceiling: self
-                .cpu_ceiling
-                .map(|ceiling| ceiling.max(resources.vcpu_count.get())),
+            cpu_ceiling: self.cpu_ceiling,
             vcpu_count: resources.vcpu_count.get(),
             memory_mib: resources.memory_mib.get(),
             memory_slot_size_mib: self.memory_slot_size_mib,
